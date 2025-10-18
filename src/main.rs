@@ -679,7 +679,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     ratatui::widgets::Row::new(cells).style(style)
                 }).collect();
                 
-                let table_height = (size.height - inner_area.y).saturating_sub(4).min(20);
+                let table_height = (size.height - inner_area.y).saturating_sub(4);
                 
                 let visible_rows: Vec<ratatui::widgets::Row> = rows.into_iter()
                     .skip(app.scroll_y as usize)
