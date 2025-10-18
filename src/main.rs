@@ -23,10 +23,9 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(name = "db_browser")]
+#[command(name = "rocksdb-viewer")]
 #[command(about = "A general RocksDB browser with TUI")]
 struct Args {
-    /// Path to the RocksDB database
     #[arg(short, long)]
     db_path: String,
 }
@@ -42,8 +41,9 @@ struct Record {
 impl Record {
     fn to_table_row(&self, all_headers: &[String]) -> Vec<String> {
         let mut row = vec![self.key.clone()];
+        
         if let Value::Object(map) = &self.data {
-            for header in &all_headers[1..] { // skip "key"
+            for header in &all_headers[1..] {
                 if let Some(value) = map.get(header) {
                     row.push(value_to_string(value));
                 } else {
@@ -51,8 +51,6 @@ impl Record {
                 }
             }
         } else {
-            // For non-object, just put the string representation
-            row.push(value_to_string(&self.data));
             for _ in 1..all_headers.len() {
                 row.push("".to_string());
             }
@@ -92,10 +90,8 @@ impl App {
             None => return vec![Constraint::Percentage(100)],
         };
         
-        // Start with header lengths
         let mut column_widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
         
-        // Find the maximum length for each column
         for record in records {
             let row_data = record.to_table_row(headers);
             for (i, cell) in row_data.iter().enumerate() {
@@ -105,18 +101,15 @@ impl App {
             }
         }
         
-        // Adjust based on available space
         let total_width: usize = column_widths.iter().sum();
         let available_width = max_width as usize;
         
-        // If we have more space than needed, just use the calculated widths
         if total_width < available_width {
             return column_widths.iter()
                 .map(|&width| Constraint::Min(width as u16))
                 .collect();
         } 
         
-        // Otherwise, distribute proportionally with minimum widths
         let mut constraints = Vec::new();
         for (i, &width) in column_widths.iter().enumerate() {
             let ratio = width as f32 / total_width as f32;
@@ -146,12 +139,11 @@ impl App {
                         let record = deserialize_record(&key, &value);
                         records.entry(record.record_type.clone()).or_insert_with(Vec::new).push(record);
                     }
-                    // Sort records by timestamp descending (latest first)
                     for recs in records.values_mut() {
                         recs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
                     }
                     if tx.send(records).is_err() {
-                        break; // Exit if the receiver has been dropped
+                        break;
                     }
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -167,7 +159,6 @@ impl App {
             receiver: rx,
         };
 
-        // Wait for initial load
         if let Ok(initial_records) = app.receiver.recv() {
             app.records = initial_records;
             app.collect_headers();
@@ -187,7 +178,7 @@ impl App {
                     }
                 }
             }
-            let mut headers = vec!["key".to_string()]; // Add key column
+            let mut headers = vec!["key".to_string()];
             let mut keys: Vec<String> = all_keys.into_iter().collect();
             keys.sort();
             headers.extend(keys);
@@ -222,25 +213,20 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, Clear(ClearType::All), EnableBlinking, LeaveAlternateScreen)?;
-    // Note: EnableMouseCapture removed to allow normal text selection
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let res = run_app(&mut terminal, app);
 
-    // Restore terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        // DisableMouseCapture removed since we're not capturing mouse
     )?;
     terminal.show_cursor()?;
 
-    // Clear the screen and print records
     execute!(std::io::stdout(), Clear(ClearType::All))?;
 
     if let Ok(app) = res {
-        // Print records to stdout for selection after quit
         let mut types: Vec<String> = app.records.keys().cloned().collect();
         types.sort();
         for record_type in types {
@@ -267,7 +253,6 @@ fn main() -> Result<()> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: App) -> Result<App, std::io::Error> {
     loop {
-        // Check for new records from background thread
         if let Ok(new_records) = app.receiver.try_recv() {
             app.records = new_records;
             app.collect_headers();
@@ -278,7 +263,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(app),
                     KeyCode::Enter => {
-                        // Filter update
                     }
                     KeyCode::Backspace => {
                         app.input.pop();
@@ -311,7 +295,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
 
         terminal.draw(|f| ui(f, &mut app))?;
 
-        // Set cursor for input
         let size = terminal.size()?;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -360,10 +343,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
         let headers = app.headers.get(&record_type).unwrap();
         
-        // Get dynamic column widths based on content
         let widths = app.calculate_column_widths(&record_type, inner_area.width.saturating_sub(2));
         
-        // Create rows with cell wrapping
         let rows: Vec<ratatui::widgets::Row> = records.iter().map(|r| {
             let cells = r.to_table_row(headers)
                 .into_iter()

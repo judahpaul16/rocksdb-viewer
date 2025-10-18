@@ -10,3 +10,4 @@ rocksdb = "0.21"       # Database access
 serde_json = "1.0"     # JSON parsing
 anyhow = "1.0"         # Error handling
 clap = { version = "4.0", features = ["derive"] } # Command line parsing
+chrono = "0.4"        # Date and time handling
