@@ -61,7 +61,7 @@ Block Records
 ## Building from Source
 
 ```bash
-git clone [repository-url]
+git clone https://github.com/judahpaul16/rocksdb-viewer
 cd rocksdb-viewer
 cargo build --release
 ```
