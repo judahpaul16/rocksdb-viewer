@@ -388,7 +388,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                     if row < filtered.len() {
                                         let record = &filtered[row];
                                         let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
-                                        app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                        app.show_raw_data = Some(format!("raw data for {}:\n{}", record.key, pretty_hex));
                                     }
                                 }
                             }
@@ -610,7 +610,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(size);
 
-    let title_line = Line::from(vec![Span::raw("Search:")]);
+    let title_line = Line::from(vec![Span::styled("search:", Style::default().fg(Color::Blue))]);
 
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default()
@@ -620,16 +620,16 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     if let Some(raw_data) = &app.show_raw_data {
         let area = centered_rect(60, 25, size);
-        let popup_block = Block::default().title("Raw Data").borders(Borders::ALL);
+        let popup_block = Block::default().title(Line::from(vec![Span::styled("raw data", Style::default().fg(Color::Magenta))])).borders(Borders::ALL);
         let paragraph = Paragraph::new(raw_data.as_str()).block(popup_block);
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(paragraph, area);
 
         let status_spans = vec![
             Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
-            Span::raw(": Quit  "),
+            Span::raw(": quit  "),
             Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-            Span::raw(": Close Raw View")
+            Span::raw(": go back")
         ];
         let status_line = Paragraph::new(Line::from(status_spans));
         let status_block = Block::default().style(Style::default().bg(Color::Green));
@@ -652,10 +652,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             ListItem::new(t.as_str()).style(style)
         }).collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Select Table Type"));
+            .block(Block::default().borders(Borders::ALL).title(Line::from(vec![Span::styled("available record types:", Style::default().fg(Color::Magenta))])));
         f.render_widget(list, chunks[2]);
     } else {
-        let title = "Records";
+        let title = Line::from(vec![Span::styled("records:", Style::default().fg(Color::Magenta))]);
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner_area = block.inner(chunks[2]);
         f.render_widget(block, chunks[2]);
@@ -695,7 +695,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .widths(&widths)
                     .block(Block::default()
                         .borders(Borders::ALL)
-                        .title(format!("{} Records", record_type)))
+                        .title(format!("{} records", record_type)))
                     .column_spacing(3);
                 f.render_widget(table, table_area);
             }
@@ -704,45 +704,45 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let mut spans = vec![
         Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
-        Span::raw(": Quit  ")
+        Span::raw(": quit  ")
     ];
 
     match app.focus {
         Focus::TableSelect => {
             spans.extend(vec![
                 Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Back to Input  "),
+                Span::raw(": focus search  "),
                 Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Select  "),
+                Span::raw(": select  "),
                 Span::styled("Up/Down", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Navigate")
+                Span::raw(": navigate")
             ]);
         },
         Focus::Table => {
             spans.extend(vec![
                 Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Table Select  "),
+                Span::raw(": go back  "),
                 Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Focus Input  "),
+                Span::raw(": focus search  "),
                 Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": View Raw  "),
+                Span::raw(": view raw record value  "),
                 Span::styled("d", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": Delete")
+                Span::raw(": delete")
             ]);
         },
         Focus::Input => {
             if app.selected_table.is_some() {
                 spans.extend(vec![
                     Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-                    Span::raw(": Table Select  ")
+                    Span::raw(": go back  ")
                 ]);
             }
             spans.extend(vec![
                 Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(if app.selected_table.is_none() {
-                    ": Select Table"
+                    ": focus table selection"
                 } else {
-                    ": Focus Records"
+                    ": focus records"
                 })
             ]);
         }
