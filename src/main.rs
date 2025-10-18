@@ -525,7 +525,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                             if now.duration_since(last_time).as_millis() < 500 && last_table == *table && last_row == row_index {
                                                 let record = &records[row_index];
                                                 let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
-                                                app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                                app.show_raw_data = Some(format!("{}:\n{}", record.key, pretty_hex));
                                                 app.last_click = None;
                                             } else {
                                                 app.last_click = Some((now, table.clone(), row_index));
