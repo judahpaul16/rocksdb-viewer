@@ -375,11 +375,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                         opts.create_if_missing(false);
                                         match DB::open(&opts, db_path) {
                                             Ok(db) => {
-                                                if let Err(e) = db.try_catch_up_with_primary() {
-                                                    app.show_raw_data = Some(format!("Error catching up with primary: {}", e));
-                                                    thread::sleep(Duration::from_millis(1000));
-                                                    continue;
-                                                }
                                                 match db.delete(key_to_remove.as_bytes()) {
                                                     Ok(_) => {
                                                         if let Some(records) = app.records.get_mut(table) {
