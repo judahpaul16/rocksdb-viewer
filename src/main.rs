@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Table},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Table, Wrap},
     Frame, Terminal,
 };
 use rocksdb::{DB, IteratorMode, Options};
@@ -279,11 +279,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                     continue;
                 } else if let Event::Mouse(mouse_event) = event {
                     if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-                        if mouse_event.row < chunks[1].bottom() {
-                            app.focus = Focus::Input;
-                        } else if mouse_event.row < chunks[2].bottom() {
-                            app.show_raw_data = None;
-                        }
+                        // Do nothing, popup is modal
                     }
                     continue;
                 }
@@ -616,12 +612,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         .block(Block::default()
             .borders(Borders::ALL)
             .title(title_line));
-    f.render_widget(input, chunks[1]);
-
+    
     if let Some(raw_data) = &app.show_raw_data {
         let area = centered_rect(60, 25, size);
         let popup_block = Block::default().title(Line::from(vec![Span::styled("raw data", Style::default().fg(Color::Magenta))])).borders(Borders::ALL);
-        let paragraph = Paragraph::new(raw_data.as_str()).block(popup_block);
+        let paragraph = Paragraph::new(raw_data.as_str())
+            .wrap(Wrap { trim: true })
+            .block(popup_block);
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(paragraph, area);
 
@@ -636,6 +633,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(status_line.block(status_block), chunks[3]);
         return;
     }
+
+    f.render_widget(input, chunks[1]);
 
     if matches!(app.focus, Focus::TableSelect) || (matches!(app.focus, Focus::Input) && app.selected_table.is_none()) {
         let mut types: Vec<String> = app.records.keys().cloned().collect();
