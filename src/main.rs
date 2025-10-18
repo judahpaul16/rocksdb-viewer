@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Table},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Table},
     Frame, Terminal,
 };
 use rocksdb::{DB, IteratorMode, Options};
@@ -74,6 +74,7 @@ fn value_to_string(value: &Value) -> String {
 #[derive(Clone, Debug)]
 enum Focus {
     Input,
+    TableSelect,
     Table,
 }
 
@@ -88,6 +89,7 @@ struct App {
     receiver: mpsc::Receiver<std::collections::HashMap<String, Vec<Record>>>,
     show_raw_data: Option<String>,
     last_click: Option<(std::time::Instant, String, usize)>, // For tracking double clicks (time, table, row)
+    table_select_index: usize,
 }
 
 impl App {
@@ -125,7 +127,7 @@ impl App {
         let mut constraints = Vec::new();
         for (i, &width) in column_widths.iter().enumerate() {
             let ratio = width as f32 / total_width as f32;
-            let min_width = if i == 0 { 20 } else { 10 }; // Key column gets more space
+            let min_width = if i == 0 { 20 } else { 10 };
             let allocated = ((available_width as f32 * ratio) as u16).max(min_width);
             constraints.push(Constraint::Min(allocated));
         }
@@ -167,12 +169,13 @@ impl App {
             headers: std::collections::HashMap::new(),
             input: String::new(),
             scroll_y: 0,
-            focus: Focus::Input,
+            focus: Focus::TableSelect,
             selected_table: None,
             selected_row: None,
             receiver: rx,
             show_raw_data: None,
             last_click: None,
+            table_select_index: 0,
         };
 
         if let Ok(initial_records) = app.receiver.recv() {
@@ -270,8 +273,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                 if let Event::Key(key) = event {
                     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                         return Ok(app);
-                    } else if key.code == KeyCode::Char('q') {
+                    } else if key.code == KeyCode::Esc {
                         app.show_raw_data = None;
+                    }
+                    continue;
+                } else if let Event::Mouse(mouse_event) = event {
+                    if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if mouse_event.row < chunks[1].bottom() {
+                            app.focus = Focus::Input;
+                        } else if mouse_event.row < chunks[2].bottom() {
+                            app.show_raw_data = None;
+                        }
                     }
                     continue;
                 }
@@ -281,15 +293,26 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(app);
                 }
+
+                if key.code == KeyCode::Esc && (matches!(app.focus, Focus::Table) || matches!(app.focus, Focus::Input)) {
+                    app.focus = Focus::TableSelect;
+                    app.selected_table = None;
+                    app.selected_row = None;
+                    continue;
+                }
+
                 if matches!(app.focus, Focus::Input) {
                     match key.code {
                         KeyCode::Tab => {
-                            app.focus = Focus::Table;
-                            let mut types: Vec<String> = app.records.keys().cloned().collect();
-                            types.sort();
-                            if let Some(table) = types.first() {
-                                app.selected_table = Some(table.clone());
-                                app.selected_row = Some(0);
+                            if app.selected_table.is_none() {
+                                let mut types: Vec<String> = app.records.keys().cloned().collect();
+                                types.sort();
+                                if !types.is_empty() {
+                                    app.focus = Focus::TableSelect;
+                                    app.table_select_index = 0;
+                                }
+                            } else {
+                                app.focus = Focus::Table;
                             }
                         }
                         KeyCode::Enter => {}
@@ -301,27 +324,41 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                         }
                         _ => {}
                     }
+                } else if matches!(app.focus, Focus::TableSelect) {
+                    match key.code {
+                        KeyCode::Tab => {
+                            app.focus = Focus::Input;
+                            app.selected_table = None;
+                            app.selected_row = None;
+                        }
+                        KeyCode::Enter => {
+                            let mut types: Vec<String> = app.records.keys().cloned().collect();
+                            types.sort();
+                            if app.table_select_index < types.len() {
+                                app.selected_table = Some(types[app.table_select_index].clone());
+                                app.selected_row = Some(0);
+                                app.focus = Focus::Table;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.table_select_index > 0 {
+                                app.table_select_index -= 1;
+                            }
+                        }
+                        KeyCode::Down => {
+                            let mut types: Vec<String> = app.records.keys().cloned().collect();
+                            types.sort();
+                            if app.table_select_index < types.len().saturating_sub(1) {
+                                app.table_select_index += 1;
+                            }
+                        }
+                        _ => {}
+                    }
                 } else {
                     match key.code {
                         KeyCode::Tab => {
-                            if let Some(current_table) = &app.selected_table {
-                                let mut types: Vec<String> = app.records.keys().cloned().collect();
-                                types.sort();
-                                if let Some(current_index) = types.iter().position(|t| t == current_table) {
-                                    let next_index = (current_index + 1) % types.len();
-                                    if next_index > current_index {
-                                        app.selected_table = Some(types[next_index].clone());
-                                        app.selected_row = Some(0);
-                                    } else {
-                                        app.focus = Focus::Input;
-                                        app.selected_table = None;
-                                        app.selected_row = None;
-                                    }
-                                }
-                            } else {
+                            if matches!(app.focus, Focus::Table) {
                                 app.focus = Focus::Input;
-                                app.selected_table = None;
-                                app.selected_row = None;
                             }
                         }
                         KeyCode::BackTab => {
@@ -335,14 +372,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                         app.selected_row = Some(0);
                                     } else {
                                         app.focus = Focus::Input;
-                                        app.selected_table = None;
-                                        app.selected_row = None;
                                     }
                                 }
                             } else {
                                 app.focus = Focus::Input;
-                                app.selected_table = None;
-                                app.selected_row = None;
                             }
                         }
                         KeyCode::Char('r') => {
@@ -399,7 +432,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                                 app.show_raw_data = Some(format!("Error opening DB: {}", e));
                                             }
                                         }
-                                        thread::sleep(Duration::from_millis(1000)); // Give time to see the message
+                                        thread::sleep(Duration::from_millis(1000));
                                     }
                                 }
                             }
@@ -414,7 +447,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                     if !filtered.is_empty() {
                                         if let Some(row) = app.selected_row {
                                             if row > 0 {
-                                                app.selected_row = Some(row - 1);
+                                                let new_row = row - 1;
+                                                app.selected_row = Some(new_row);
+                                                
+                                                if new_row < app.scroll_y as usize {
+                                                    app.scroll_y = new_row as u16;
+                                                }
                                             }
                                         } else {
                                             app.selected_row = Some(0);
@@ -441,7 +479,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                                         let max_row = filtered.len().saturating_sub(1);
                                         if let Some(row) = app.selected_row {
                                             if row < max_row {
-                                                app.selected_row = Some(row + 1);
+                                                let new_row = row + 1;
+                                                app.selected_row = Some(new_row);
+                                                
+                                                if new_row >= app.scroll_y as usize + 9 {
+                                                    app.scroll_y = new_row as u16 - 8;
+                                                }
                                             }
                                         } else {
                                             app.selected_row = Some(0);
@@ -462,62 +505,79 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
                 }
             } else if let Event::Mouse(mouse_event) = event {
                 if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if mouse_event.column >= chunks[1].left() && mouse_event.column < chunks[1].right() && mouse_event.row >= chunks[1].top() && mouse_event.row < chunks[1].bottom() {
+                    if mouse_event.row < chunks[1].bottom() {
                         app.focus = Focus::Input;
-                        app.selected_table = None;
-                        app.selected_row = None;
-                    } else {
-                        let mut y_offset = chunks[2].y;
-                        let mut types: Vec<String> = app.records.keys().cloned().collect();
-                        types.sort();
-                        for record_type in types {
-                            let mut records = app.records.get(&record_type).unwrap().clone();
-                            if !app.input.is_empty() {
-                                records.retain(|r| r.key.contains(&app.input));
-                            }
-                            if records.is_empty() {
-                                continue;
-                            }
-                            
-                            let max_table_height = (size.height - y_offset).saturating_sub(2);
-                            let table_height = 10.min(max_table_height);
-                            if table_height == 0 {
-                                break;
-                            }
-                            
-                            let table_area = Rect::new(chunks[2].x, y_offset, chunks[2].width, table_height + 2);
-                            if mouse_event.column >= table_area.left() && mouse_event.column < table_area.right() && mouse_event.row >= table_area.top() && mouse_event.row < table_area.bottom() {
-                                let relative_y = mouse_event.row.saturating_sub(table_area.y + 1);
-                                let row_index = if relative_y > 0 { relative_y.saturating_sub(2) as usize } else { 0 };
-                                if row_index < records.len() {
-                                    // Check for double click
-                                    let now = std::time::Instant::now();
-                                    if let Some((last_time, last_table, last_row)) = app.last_click {
-                                        if now.duration_since(last_time).as_millis() < 500 
-                                            && last_table == record_type 
-                                            && last_row == row_index {
-                                            // Double click detected - show raw data
-                                            let record = &records[row_index];
-                                            let pretty_hex = record.raw_data.iter()
-                                                .map(|byte| format!("{:02x}", byte))
-                                                .collect::<Vec<String>>()
-                                                .join(" ");
-                                            app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
-                                            app.last_click = None;
-                                            break;
+                    } else if mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
+                        if app.selected_table.is_some() {
+                            app.focus = Focus::Table;
+                            if let Some(table) = &app.selected_table {
+                                let table_height = (size.height - chunks[2].y).saturating_sub(4).min(20);
+                                if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height {
+                                    let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
+                                    let row_index = app.scroll_y as usize + relative_y as usize;
+                                    let mut records = app.records.get(table).unwrap().clone();
+                                    if !app.input.is_empty() {
+                                        records.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if row_index < records.len() {
+                                        let now = std::time::Instant::now();
+                                        if let Some((last_time, last_table, last_row)) = app.last_click {
+                                            if now.duration_since(last_time).as_millis() < 500 && last_table == *table && last_row == row_index {
+                                                let record = &records[row_index];
+                                                let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
+                                                app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                                app.last_click = None;
+                                            } else {
+                                                app.last_click = Some((now, table.clone(), row_index));
+                                                app.selected_row = Some(row_index);
+                                            }
+                                        } else {
+                                            app.last_click = Some((now, table.clone(), row_index));
+                                            app.selected_row = Some(row_index);
                                         }
                                     }
-                                    // Store click info
-                                    app.last_click = Some((now, record_type.clone(), row_index));
-                                    app.focus = Focus::Table;
-                                    app.selected_table = Some(record_type.clone());
-                                    app.selected_row = Some(row_index);
-                                    break;
                                 }
                             }
-                            y_offset += table_height + 3;
-                            if y_offset >= chunks[2].bottom() {
-                                break;
+                        } else {
+                            let relative_row = mouse_event.row.saturating_sub(chunks[2].top() + 1);
+                            let mut types: Vec<String> = app.records.keys().cloned().collect();
+                            types.sort();
+                            if relative_row < types.len() as u16 {
+                                app.table_select_index = relative_row as usize;
+                                app.selected_table = Some(types[app.table_select_index].clone());
+                                app.selected_row = Some(0);
+                                app.focus = Focus::Table;
+                            }
+                        }
+                    } else if matches!(app.focus, Focus::Table) {
+                        if let Some(table) = &app.selected_table {
+                            if mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
+                                let table_height = (size.height - chunks[2].y).saturating_sub(4).min(20);
+                                if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height {
+                                    let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
+                                    let row_index = app.scroll_y as usize + relative_y as usize;
+                                    let mut records = app.records.get(table).unwrap().clone();
+                                    if !app.input.is_empty() {
+                                        records.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if row_index < records.len() {
+                                        let now = std::time::Instant::now();
+                                        if let Some((last_time, last_table, last_row)) = app.last_click {
+                                            if now.duration_since(last_time).as_millis() < 500 && last_table == *table && last_row == row_index {
+                                                let record = &records[row_index];
+                                                let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
+                                                app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                                app.last_click = None;
+                                            } else {
+                                                app.last_click = Some((now, table.clone(), row_index));
+                                                app.selected_row = Some(row_index);
+                                            }
+                                        } else {
+                                            app.last_click = Some((now, table.clone(), row_index));
+                                            app.selected_row = Some(row_index);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -550,18 +610,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(size);
 
-    let title_line = Line::from(vec![Span::raw("Filter by Key")]);
+    let title_line = Line::from(vec![Span::raw("Search:")]);
 
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default()
             .borders(Borders::ALL)
             .title(title_line));
     f.render_widget(input, chunks[1]);
-
-    let title = "Records";
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner_area = block.inner(chunks[2]);
-    f.render_widget(block, chunks[2]);
 
     if let Some(raw_data) = &app.show_raw_data {
         let area = centered_rect(60, 25, size);
@@ -573,7 +628,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         let status_spans = vec![
             Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
             Span::raw(": Quit  "),
-            Span::styled("q", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
             Span::raw(": Close Raw View")
         ];
         let status_line = Paragraph::new(Line::from(status_spans));
@@ -582,72 +637,117 @@ fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let mut y_offset = 0;
-    let mut types: Vec<String> = app.records.keys().cloned().collect();
-    types.sort();
-    for record_type in types {
-        let mut records = app.records.get(&record_type).unwrap().clone();
-        if !app.input.is_empty() {
-            records.retain(|r| r.key.contains(&app.input));
-        }
-        if records.is_empty() {
-            continue;
-        }
-        let headers = app.headers.get(&record_type).unwrap();
+    if matches!(app.focus, Focus::TableSelect) || (matches!(app.focus, Focus::Input) && app.selected_table.is_none()) {
+        let mut types: Vec<String> = app.records.keys().cloned().collect();
+        types.sort();
         
-        let widths = app.calculate_column_widths(&record_type, inner_area.width.saturating_sub(2));
-        
-        let rows: Vec<ratatui::widgets::Row> = records.iter().enumerate().map(|(i, r)| {
-            let style = if app.selected_table.as_ref() == Some(&record_type) && app.selected_row == Some(i) { Style::default().bg(Color::Blue) } else { Style::default() };
-            let cells = r.to_table_row(headers)
-                .into_iter()
-                .map(|content| {
-                    ratatui::widgets::Cell::from(content)
-                });
-            ratatui::widgets::Row::new(cells).style(style)
+        let filtered_types = if !app.input.is_empty() {
+            types.into_iter().filter(|t| t.contains(&app.input)).collect()
+        } else {
+            types
+        };
+
+        let items: Vec<ListItem> = filtered_types.iter().enumerate().map(|(i, t)| {
+            let style = if matches!(app.focus, Focus::TableSelect) && i == app.table_select_index { Style::default().bg(Color::Blue) } else { Style::default() };
+            ListItem::new(t.as_str()).style(style)
         }).collect();
-        
-        let max_table_height = (size.height - (inner_area.y + y_offset)).saturating_sub(2);
-        let table_height = 10.min(max_table_height);
-        if table_height == 0 {
-            break;
-        }
-        let start = app.scroll_y as usize;
-        let visible_rows: Vec<_> = rows.into_iter().skip(start).take(table_height as usize).collect();
-        let table_area = Rect::new(inner_area.x, inner_area.y + y_offset, inner_area.width, table_height + 2);
-        let header_cells = headers.iter().cloned().map(ratatui::widgets::Cell::from);
-        let header_row = ratatui::widgets::Row::new(header_cells).style(Style::default().fg(Color::Yellow));
-        
-        let table = Table::new(visible_rows)
-            .header(header_row)
-            .widths(&widths)
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{} Records", record_type)))
-            .column_spacing(3);
-        f.render_widget(table, table_area);
-        y_offset += table_height + 3;
-        if y_offset >= inner_area.height {
-            break;
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Select Table Type"));
+        f.render_widget(list, chunks[2]);
+    } else {
+        let title = "Records";
+        let block = Block::default().borders(Borders::ALL).title(title);
+        let inner_area = block.inner(chunks[2]);
+        f.render_widget(block, chunks[2]);
+
+        if let Some(ref record_type) = app.selected_table {
+            let mut records = app.records.get(record_type).unwrap().clone();
+            if !app.input.is_empty() {
+                records.retain(|r| r.key.contains(&app.input));
+            }
+            if !records.is_empty() {
+                let headers = app.headers.get(record_type).unwrap();
+                
+                let widths = app.calculate_column_widths(&record_type, inner_area.width.saturating_sub(2));
+                
+                let rows: Vec<ratatui::widgets::Row> = records.iter().enumerate().map(|(i, r)| {
+                    let style = if app.selected_row == Some(i) { Style::default().bg(Color::Blue) } else { Style::default() };
+                    let cells = r.to_table_row(headers)
+                        .into_iter()
+                        .map(|content| {
+                            ratatui::widgets::Cell::from(content)
+                        });
+                    ratatui::widgets::Row::new(cells).style(style)
+                }).collect();
+                
+                let table_height = (size.height - inner_area.y).saturating_sub(4).min(20);
+                
+                let visible_rows: Vec<ratatui::widgets::Row> = rows.into_iter()
+                    .skip(app.scroll_y as usize)
+                    .take(table_height as usize)
+                    .collect();
+                let table_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, table_height);
+                let header_cells = headers.iter().cloned().map(ratatui::widgets::Cell::from);
+                let header_row = ratatui::widgets::Row::new(header_cells).style(Style::default().fg(Color::Yellow));
+                
+                let table = Table::new(visible_rows)
+                    .header(header_row)
+                    .widths(&widths)
+                    .block(Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("{} Records", record_type)))
+                    .column_spacing(3);
+                f.render_widget(table, table_area);
+            }
         }
     }
 
-    let mut status_spans = vec![
+    let mut spans = vec![
         Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
-        Span::raw(": Quit  "),
-        Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
-        Span::raw(": Switch Focus")
+        Span::raw(": Quit  ")
     ];
-    if app.selected_table.is_some() && app.selected_row.is_some() {
-        status_spans.extend_from_slice(&[
-            Span::raw("  "),
-            Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
-            Span::raw(": View Raw  "),
-            Span::styled("d", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
-            Span::raw(": Delete")
-        ]);
+
+    match app.focus {
+        Focus::TableSelect => {
+            spans.extend(vec![
+                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Back to Input  "),
+                Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Select  "),
+                Span::styled("Up/Down", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Navigate")
+            ]);
+        },
+        Focus::Table => {
+            spans.extend(vec![
+                Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Table Select  "),
+                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Focus Input  "),
+                Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": View Raw  "),
+                Span::styled("d", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": Delete")
+            ]);
+        },
+        Focus::Input => {
+            if app.selected_table.is_some() {
+                spans.extend(vec![
+                    Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                    Span::raw(": Table Select  ")
+                ]);
+            }
+            spans.extend(vec![
+                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(if app.selected_table.is_none() {
+                    ": Select Table"
+                } else {
+                    ": Focus Records"
+                })
+            ]);
+        }
     }
-    let status_line = Paragraph::new(Line::from(status_spans));
+    let status_line = Paragraph::new(Line::from(spans));
     let status_block = Block::default()
         .style(Style::default().bg(Color::Green));
     f.render_widget(status_line.block(status_block), chunks[3]);
