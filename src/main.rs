@@ -2,14 +2,15 @@ use anyhow::Result;
 use clap::Parser;
 use crossterm::{
     cursor::EnableBlinking,
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Table},
     Frame, Terminal,
 };
@@ -36,6 +37,7 @@ struct Record {
     key: String,
     timestamp: i64,
     data: Value,
+    raw_data: Vec<u8>,
 }
 
 impl Record {
@@ -69,13 +71,23 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
+enum Focus {
+    Input,
+    Table,
+}
+
 struct App {
     records: std::collections::HashMap<String, Vec<Record>>, // type -> records
     headers: std::collections::HashMap<String, Vec<String>>, // type -> headers
     input: String,
     scroll_y: u16,
-    scroll_x: u16,
+    focus: Focus,
+    selected_table: Option<String>,
+    selected_row: Option<usize>,
     receiver: mpsc::Receiver<std::collections::HashMap<String, Vec<Record>>>,
+    show_raw_data: Option<String>,
+    last_click: Option<(std::time::Instant, String, usize)>, // For tracking double clicks (time, table, row)
 }
 
 impl App {
@@ -155,8 +167,12 @@ impl App {
             headers: std::collections::HashMap::new(),
             input: String::new(),
             scroll_y: 0,
-            scroll_x: 0,
+            focus: Focus::Input,
+            selected_table: None,
+            selected_row: None,
             receiver: rx,
+            show_raw_data: None,
+            last_click: None,
         };
 
         if let Ok(initial_records) = app.receiver.recv() {
@@ -202,108 +218,328 @@ fn deserialize_record(key: &str, value: &[u8]) -> Record {
         Value::Object(serde_json::Map::from_iter(vec![("value".to_string(), Value::String(String::from_utf8_lossy(value).to_string()))]))
     };
 
-    Record { record_type, key: key.to_string(), timestamp, data }
+    Record { record_type, key: key.to_string(), timestamp, data, raw_data: value.to_vec() }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let app = App::new(&args.db_path)?;
 
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, Clear(ClearType::All), EnableBlinking, LeaveAlternateScreen)?;
+    execute!(stdout, Clear(ClearType::All), EnableBlinking, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_app(&mut terminal, app);
+    let res = run_app(&mut terminal, app, &args.db_path);
 
+    execute!(terminal.backend_mut(), Clear(ClearType::All))?;
+    execute!(terminal.backend_mut(), crossterm::cursor::MoveTo(0, 0))?;
+    
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
-    execute!(std::io::stdout(), Clear(ClearType::All))?;
-
-    if let Ok(app) = res {
-        let mut types: Vec<String> = app.records.keys().cloned().collect();
-        types.sort();
-        for record_type in types {
-            let records = app.records.get(&record_type).unwrap();
-            if records.is_empty() {
-                continue;
-            }
-            println!("{} Records", record_type);
-            if let Some(headers) = app.headers.get(&record_type) {
-                println!("{}", headers.join("\t"));
-                for record in records {
-                    let row = record.to_table_row(headers);
-                    println!("{}", row.join("\t"));
-                }
-            }
-            println!();
-        }
-    } else if let Err(err) = res {
-        println!("{:?}", err);
+    if let Err(err) = res {
+        eprintln!("Error: {:?}", err);
     }
 
     Ok(())
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: App) -> Result<App, std::io::Error> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: App, db_path: &str) -> Result<App, std::io::Error> {
     loop {
         if let Ok(new_records) = app.receiver.try_recv() {
             app.records = new_records;
             app.collect_headers();
         }
 
+        let size = terminal.size()?;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Min(1)].as_ref())
+            .split(size);
+
         if crossterm::event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(app),
-                    KeyCode::Enter => {
+            let event = event::read()?;
+
+            if let Some(_) = app.show_raw_data {
+                if let Event::Key(key) = event {
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        return Ok(app);
+                    } else if key.code == KeyCode::Char('q') {
+                        app.show_raw_data = None;
                     }
-                    KeyCode::Backspace => {
-                        app.input.pop();
+                    continue;
+                }
+            }
+
+            if let Event::Key(key) = event {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(app);
+                }
+                if matches!(app.focus, Focus::Input) {
+                    match key.code {
+                        KeyCode::Tab => {
+                            app.focus = Focus::Table;
+                            let mut types: Vec<String> = app.records.keys().cloned().collect();
+                            types.sort();
+                            if let Some(table) = types.first() {
+                                app.selected_table = Some(table.clone());
+                                app.selected_row = Some(0);
+                            }
+                        }
+                        KeyCode::Enter => {}
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input.push(c);
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char(c) => {
-                        app.input.push(c);
+                } else {
+                    match key.code {
+                        KeyCode::Tab => {
+                            if let Some(current_table) = &app.selected_table {
+                                let mut types: Vec<String> = app.records.keys().cloned().collect();
+                                types.sort();
+                                if let Some(current_index) = types.iter().position(|t| t == current_table) {
+                                    let next_index = (current_index + 1) % types.len();
+                                    if next_index > current_index {
+                                        app.selected_table = Some(types[next_index].clone());
+                                        app.selected_row = Some(0);
+                                    } else {
+                                        app.focus = Focus::Input;
+                                        app.selected_table = None;
+                                        app.selected_row = None;
+                                    }
+                                }
+                            } else {
+                                app.focus = Focus::Input;
+                                app.selected_table = None;
+                                app.selected_row = None;
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            if let Some(current_table) = &app.selected_table {
+                                let mut types: Vec<String> = app.records.keys().cloned().collect();
+                                types.sort();
+                                if let Some(current_index) = types.iter().position(|t| t == current_table) {
+                                    if current_index > 0 {
+                                        let prev_index = current_index - 1;
+                                        app.selected_table = Some(types[prev_index].clone());
+                                        app.selected_row = Some(0);
+                                    } else {
+                                        app.focus = Focus::Input;
+                                        app.selected_table = None;
+                                        app.selected_row = None;
+                                    }
+                                }
+                            } else {
+                                app.focus = Focus::Input;
+                                app.selected_table = None;
+                                app.selected_row = None;
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            if let (Some(table), Some(row)) = (&app.selected_table, app.selected_row) {
+                                if let Some(records) = app.records.get(table) {
+                                    let mut filtered = records.clone();
+                                    if !app.input.is_empty() {
+                                        filtered.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if row < filtered.len() {
+                                        let record = &filtered[row];
+                                        let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
+                                        app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('d') => {
+                            if let (Some(table), Some(row)) = (app.selected_table.as_ref(), app.selected_row) {
+                                if let Some(records) = app.records.get(table) {
+                                    let mut filtered = records.clone();
+                                    if !app.input.is_empty() {
+                                        filtered.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if row < filtered.len() {
+                                        let key_to_remove = filtered[row].key.clone();
+                                        app.show_raw_data = Some(format!("Attempting to delete key: {}", key_to_remove));
+                                        
+                                        let mut opts = Options::default();
+                                        opts.create_if_missing(false);
+                                        match DB::open(&opts, db_path) {
+                                            Ok(db) => {
+                                                if let Err(e) = db.try_catch_up_with_primary() {
+                                                    app.show_raw_data = Some(format!("Error catching up with primary: {}", e));
+                                                    thread::sleep(Duration::from_millis(1000));
+                                                    continue;
+                                                }
+                                                match db.delete(key_to_remove.as_bytes()) {
+                                                    Ok(_) => {
+                                                        if let Some(records) = app.records.get_mut(table) {
+                                                            records.retain(|r| r.key != key_to_remove);
+                                                            app.show_raw_data = Some(format!("Successfully deleted key: {}", key_to_remove));
+                                                            
+                                                            if records.is_empty() {
+                                                                app.selected_table = None;
+                                                                app.selected_row = None;
+                                                            } else {
+                                                                let max_row = records.len().saturating_sub(1);
+                                                                app.selected_row = Some(row.min(max_row));
+                                                            }
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        app.show_raw_data = Some(format!("Error deleting key {}: {}", key_to_remove, e));
+                                                    }
+                                                }
+                                            },
+                                            Err(e) => {
+                                                app.show_raw_data = Some(format!("Error opening DB: {}", e));
+                                            }
+                                        }
+                                        thread::sleep(Duration::from_millis(1000)); // Give time to see the message
+                                    }
+                                }
+                            }
+                        },
+                        KeyCode::Up => {
+                            if let Some(table) = &app.selected_table {
+                                if let Some(records) = app.records.get(table) {
+                                    let mut filtered = records.clone();
+                                    if !app.input.is_empty() {
+                                        filtered.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if !filtered.is_empty() {
+                                        if let Some(row) = app.selected_row {
+                                            if row > 0 {
+                                                app.selected_row = Some(row - 1);
+                                            }
+                                        } else {
+                                            app.selected_row = Some(0);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let mut types: Vec<String> = app.records.keys().cloned().collect();
+                                types.sort();
+                                if let Some(table) = types.first() {
+                                    app.selected_table = Some(table.clone());
+                                    app.selected_row = Some(0);
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(table) = &app.selected_table {
+                                if let Some(records) = app.records.get(table) {
+                                    let mut filtered = records.clone();
+                                    if !app.input.is_empty() {
+                                        filtered.retain(|r| r.key.contains(&app.input));
+                                    }
+                                    if !filtered.is_empty() {
+                                        let max_row = filtered.len().saturating_sub(1);
+                                        if let Some(row) = app.selected_row {
+                                            if row < max_row {
+                                                app.selected_row = Some(row + 1);
+                                            }
+                                        } else {
+                                            app.selected_row = Some(0);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let mut types: Vec<String> = app.records.keys().cloned().collect();
+                                types.sort();
+                                if let Some(table) = types.first() {
+                                    app.selected_table = Some(table.clone());
+                                    app.selected_row = Some(0);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    KeyCode::Up => {
-                        app.scroll_y = app.scroll_y.saturating_sub(1);
+                }
+            } else if let Event::Mouse(mouse_event) = event {
+                if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if mouse_event.column >= chunks[1].left() && mouse_event.column < chunks[1].right() && mouse_event.row >= chunks[1].top() && mouse_event.row < chunks[1].bottom() {
+                        app.focus = Focus::Input;
+                        app.selected_table = None;
+                        app.selected_row = None;
+                    } else {
+                        let mut y_offset = chunks[2].y;
+                        let mut types: Vec<String> = app.records.keys().cloned().collect();
+                        types.sort();
+                        for record_type in types {
+                            let mut records = app.records.get(&record_type).unwrap().clone();
+                            if !app.input.is_empty() {
+                                records.retain(|r| r.key.contains(&app.input));
+                            }
+                            if records.is_empty() {
+                                continue;
+                            }
+                            
+                            let max_table_height = (size.height - y_offset).saturating_sub(2);
+                            let table_height = 10.min(max_table_height);
+                            if table_height == 0 {
+                                break;
+                            }
+                            
+                            let table_area = Rect::new(chunks[2].x, y_offset, chunks[2].width, table_height + 2);
+                            if mouse_event.column >= table_area.left() && mouse_event.column < table_area.right() && mouse_event.row >= table_area.top() && mouse_event.row < table_area.bottom() {
+                                let relative_y = mouse_event.row.saturating_sub(table_area.y + 1);
+                                let row_index = if relative_y > 0 { relative_y.saturating_sub(2) as usize } else { 0 };
+                                if row_index < records.len() {
+                                    // Check for double click
+                                    let now = std::time::Instant::now();
+                                    if let Some((last_time, last_table, last_row)) = app.last_click {
+                                        if now.duration_since(last_time).as_millis() < 500 
+                                            && last_table == record_type 
+                                            && last_row == row_index {
+                                            // Double click detected - show raw data
+                                            let record = &records[row_index];
+                                            let pretty_hex = record.raw_data.iter()
+                                                .map(|byte| format!("{:02x}", byte))
+                                                .collect::<Vec<String>>()
+                                                .join(" ");
+                                            app.show_raw_data = Some(format!("Raw data for {}:\n{}", record.key, pretty_hex));
+                                            app.last_click = None;
+                                            break;
+                                        }
+                                    }
+                                    // Store click info
+                                    app.last_click = Some((now, record_type.clone(), row_index));
+                                    app.focus = Focus::Table;
+                                    app.selected_table = Some(record_type.clone());
+                                    app.selected_row = Some(row_index);
+                                    break;
+                                }
+                            }
+                            y_offset += table_height + 3;
+                            if y_offset >= chunks[2].bottom() {
+                                break;
+                            }
+                        }
                     }
-                    KeyCode::Down => {
-                        app.scroll_y += 1;
-                    }
-                    KeyCode::Left => {
-                        app.scroll_x = app.scroll_x.saturating_sub(1);
-                    }
-                    KeyCode::Right => {
-                        app.scroll_x += 1;
-                    }
-                    KeyCode::PageUp => {
-                        app.scroll_y = app.scroll_y.saturating_sub(10);
-                    }
-                    KeyCode::PageDown => {
-                        app.scroll_y += 10;
-                    }
-                    _ => {}
                 }
             }
         }
 
         terminal.draw(|f| ui(f, &mut app))?;
 
-        let size = terminal.size()?;
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Min(1)].as_ref())
-            .split(size);
-        let cursor_x = chunks[1].x + 1 + app.input.len() as u16;
-        let cursor_y = chunks[1].y + 1;
-        terminal.set_cursor(cursor_x, cursor_y)?;
-        terminal.show_cursor()?;
+        if matches!(app.focus, Focus::Input) {
+            let cursor_x = chunks[1].x + 1 + app.input.len() as u16;
+            let cursor_y = chunks[1].y + 1;
+            terminal.set_cursor(cursor_x, cursor_y)?;
+            terminal.show_cursor()?;
+        } else {
+            terminal.hide_cursor()?;
+        }
     }
 }
 
@@ -311,24 +547,45 @@ fn ui(f: &mut Frame, app: &mut App) {
     let size = f.size();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(3), Constraint::Min(1)].as_ref())
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1)
+        ].as_ref())
         .split(size);
+
+    let title_line = Line::from(vec![Span::raw("Filter by Key")]);
 
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default()
             .borders(Borders::ALL)
-            .title("Filter by Key ")
-            .title_style(Style::default())
-            .title(ratatui::text::Span::styled(
-                "(Press 'q' to quit)", 
-                Style::default().fg(Color::Red)
-            )));
+            .title(title_line));
     f.render_widget(input, chunks[1]);
 
     let title = "Records";
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner_area = block.inner(chunks[2]);
     f.render_widget(block, chunks[2]);
+
+    if let Some(raw_data) = &app.show_raw_data {
+        let area = centered_rect(60, 25, size);
+        let popup_block = Block::default().title("Raw Data").borders(Borders::ALL);
+        let paragraph = Paragraph::new(raw_data.as_str()).block(popup_block);
+        f.render_widget(ratatui::widgets::Clear, area);
+        f.render_widget(paragraph, area);
+
+        let status_spans = vec![
+            Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw(": Quit  "),
+            Span::styled("q", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw(": Close Raw View")
+        ];
+        let status_line = Paragraph::new(Line::from(status_spans));
+        let status_block = Block::default().style(Style::default().bg(Color::Green));
+        f.render_widget(status_line.block(status_block), chunks[3]);
+        return;
+    }
 
     let mut y_offset = 0;
     let mut types: Vec<String> = app.records.keys().cloned().collect();
@@ -345,17 +602,21 @@ fn ui(f: &mut Frame, app: &mut App) {
         
         let widths = app.calculate_column_widths(&record_type, inner_area.width.saturating_sub(2));
         
-        let rows: Vec<ratatui::widgets::Row> = records.iter().map(|r| {
+        let rows: Vec<ratatui::widgets::Row> = records.iter().enumerate().map(|(i, r)| {
+            let style = if app.selected_table.as_ref() == Some(&record_type) && app.selected_row == Some(i) { Style::default().bg(Color::Blue) } else { Style::default() };
             let cells = r.to_table_row(headers)
                 .into_iter()
                 .map(|content| {
-                    // Create cell with wrapping enabled
                     ratatui::widgets::Cell::from(content)
                 });
-            ratatui::widgets::Row::new(cells)
+            ratatui::widgets::Row::new(cells).style(style)
         }).collect();
         
-        let table_height = 10;
+        let max_table_height = (size.height - (inner_area.y + y_offset)).saturating_sub(2);
+        let table_height = 10.min(max_table_height);
+        if table_height == 0 {
+            break;
+        }
         let start = app.scroll_y as usize;
         let visible_rows: Vec<_> = rows.into_iter().skip(start).take(table_height as usize).collect();
         let table_area = Rect::new(inner_area.x, inner_area.y + y_offset, inner_area.width, table_height + 2);
@@ -375,5 +636,45 @@ fn ui(f: &mut Frame, app: &mut App) {
             break;
         }
     }
+
+    let mut status_spans = vec![
+        Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::raw(": Quit  "),
+        Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::raw(": Switch Focus")
+    ];
+    if app.selected_table.is_some() && app.selected_row.is_some() {
+        status_spans.extend_from_slice(&[
+            Span::raw("  "),
+            Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw(": View Raw  "),
+            Span::styled("d", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw(": Delete")
+        ]);
+    }
+    let status_line = Paragraph::new(Line::from(status_spans));
+    let status_block = Block::default()
+        .style(Style::default().bg(Color::Green));
+    f.render_widget(status_line.block(status_block), chunks[3]);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
