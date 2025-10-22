@@ -20,6 +20,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1)
         ].as_ref())
         .split(size);
@@ -94,11 +95,18 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     ratatui::widgets::Row::new(cells).style(style)
                 }).collect();
 
-                let table_height = (size.height - inner_area.y).saturating_sub(4);
+                let table_height = chunks[2].height.saturating_sub(4);
 
+                let total_pages = app.get_total_pages(record_type, table_height);
+                if total_pages > 0 && app.current_page >= total_pages {
+                    app.current_page = total_pages.saturating_sub(1);
+                }
+
+                let records_per_page = table_height as usize;
+                let start_idx = app.current_page * records_per_page;
                 let visible_rows: Vec<ratatui::widgets::Row> = rows.into_iter()
-                    .skip(app.scroll_y as usize)
-                    .take(table_height as usize)
+                    .skip(start_idx)
+                    .take(records_per_page)
                     .collect();
                 let table_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, table_height);
                 let header_cells = headers.iter().enumerate().map(|(i, h)| {
@@ -122,6 +130,32 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                         .title(format!("{} records", record_type)))
                     .column_spacing(3);
                 f.render_widget(table, table_area);
+
+                let total_pages = app.get_total_pages(record_type, table_height);
+                if total_pages > 1 {
+                    let mut page_spans = Vec::new();
+                    page_spans.push(Span::styled(" Pages: ", Style::default().fg(Color::White)));
+                    let indices = app.visible_page_indices(total_pages);
+                    let mut prev_idx: Option<usize> = None;
+                    for page_idx in indices {
+                        if let Some(prev) = prev_idx {
+                            if page_idx > prev + 1 { page_spans.push(Span::raw(" … ")); }
+                            else { page_spans.push(Span::raw(" ")); }
+                        }
+                        let style = if app.page_focus && app.current_page == page_idx {
+                            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                        } else if app.current_page == page_idx {
+                            Style::default().fg(Color::Black).bg(Color::LightBlue)
+                        } else {
+                            Style::default().fg(Color::LightBlue)
+                        };
+                        page_spans.push(Span::styled(format!(" {} ", page_idx + 1), style));
+                        prev_idx = Some(page_idx);
+                    }
+                    let page_line = Paragraph::new(Line::from(page_spans))
+                        .block(Block::default().style(Style::default().bg(Color::Black)));
+                    f.render_widget(page_line, chunks[3]);
+                }
             }
         }
     }
@@ -147,11 +181,21 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 Span::styled("Esc", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": go back  "),
                 Span::styled("Tab", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
-                Span::raw(": focus search  "),
+                Span::raw(": focus pages  "),
                 Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": view raw record value  "),
                 Span::styled("d", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": delete")
+            ]);
+        },
+        crate::app::Focus::Pages => {
+            spans.extend(vec![
+                Span::styled("Esc", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": go back  "),
+                Span::styled("Tab", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": focus search  "),
+                Span::styled("Left/Right", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::raw(": change page")
             ]);
         },
         crate::app::Focus::Input => {
@@ -174,7 +218,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     let status_line = Paragraph::new(Line::from(spans));
     let status_block = Block::default()
         .style(Style::default().bg(footer_bg_color));
-    f.render_widget(status_line.block(status_block), chunks[3]);
+    f.render_widget(status_line.block(status_block), chunks[4]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

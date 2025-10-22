@@ -33,7 +33,7 @@ fn handle_key_event(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
         return;
     }
 
-    if key.code == KeyCode::Esc && (app.focus == Focus::Table || app.focus == Focus::Input) {
+    if key.code == KeyCode::Esc && (app.focus == Focus::Table || app.focus == Focus::Input || app.focus == Focus::Pages) {
         app.focus = Focus::TableSelect;
         app.selected_table = None;
         app.selected_row = None;
@@ -44,6 +44,7 @@ fn handle_key_event(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
         Focus::Input => handle_input_key(key, app),
         Focus::TableSelect => handle_table_select_key(key, app),
         Focus::Table => handle_table_key(key, app, db_path),
+        Focus::Pages => handle_pages_key(key, app),
     }
 }
 
@@ -88,6 +89,7 @@ fn handle_table_select_key(key: crossterm::event::KeyEvent, app: &mut App) {
                 app.focus = Focus::Table;
                 app.sort_column = None;
                 app.sort_ascending = true;
+                app.current_page = 0;
             }
         }
         KeyCode::Up => {
@@ -106,10 +108,38 @@ fn handle_table_select_key(key: crossterm::event::KeyEvent, app: &mut App) {
     }
 }
 
-fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &str) {
+fn handle_pages_key(key: crossterm::event::KeyEvent, app: &mut App) {
     match key.code {
         KeyCode::Tab => {
             app.focus = Focus::Input;
+            app.page_focus = false;
+        },
+        KeyCode::Esc => {
+            app.focus = Focus::Table;
+            app.page_focus = false;
+        },
+        KeyCode::Left => {
+            if app.current_page > 0 {
+                app.current_page -= 1;
+            }
+        },
+        KeyCode::Right => {
+            if let Some(ref table) = app.selected_table {
+                let total_pages = app.get_total_pages(table, 20);
+                if app.current_page + 1 < total_pages {
+                    app.current_page += 1;
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &str) {
+    match key.code {
+        KeyCode::Tab => {
+            app.focus = Focus::Pages;
+            app.page_focus = true;
         }
         KeyCode::BackTab => {
             if let Some(current_table) = &app.selected_table {
@@ -141,12 +171,13 @@ fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
             }
         }
         KeyCode::PageDown => {
-            app.data_manager.loader.next_page();
-            app.data_manager.refresh();
+            if let Some(table) = &app.selected_table {
+                let total_pages = app.get_total_pages(table, 20);
+                if app.current_page + 1 < total_pages { app.current_page += 1; }
+            }
         },
         KeyCode::PageUp => {
-            app.data_manager.loader.prev_page();
-            app.data_manager.refresh();
+            if app.current_page > 0 { app.current_page -= 1; }
         },
         KeyCode::Char('d') => {
             if let (Some(table), Some(row)) = (app.selected_table.as_ref(), app.selected_row) {
@@ -248,12 +279,46 @@ fn handle_navigation_down(app: &mut App) {
 
 fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, chunks: &[ratatui::layout::Rect]) {
     if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-        if mouse_event.row < chunks[1].bottom() {
+        if chunks.len() > 3 && mouse_event.row >= chunks[3].top() && mouse_event.row < chunks[3].bottom() {
+            if let Some(table) = &app.selected_table {
+                if let Some(records) = app.data_manager.get_records().get(table) {
+                    let table_height = if chunks.len() > 2 { (chunks[2].height.saturating_sub(4)) as usize } else { 20 };
+                    let records_per_page = table_height;
+                    let total_pages = (records.len() + records_per_page - 1) / records_per_page;
+                    let prefix = " Pages: ";
+                    let mut current_x = chunks[3].x + prefix.chars().count() as u16;
+                    let indices = app.visible_page_indices(total_pages);
+                    let mut iter = indices.iter().peekable();
+                    while let Some(&page_idx) = iter.next() {
+                        let page_text = format!(" {} ", page_idx + 1);
+                        let width = page_text.len() as u16;
+                        if mouse_event.column >= current_x && mouse_event.column < current_x + width {
+                            app.current_page = page_idx;
+                            app.focus = Focus::Pages;
+                            app.page_focus = true;
+                            let start_idx = page_idx * records_per_page;
+                            if !records.is_empty() {
+                                let clamped = start_idx.min(records.len().saturating_sub(1));
+                                app.selected_row = Some(clamped);
+                                app.scroll_y = start_idx as u16;
+                            }
+                            return;
+                        }
+                        current_x += width;
+                        if let Some(&next_idx) = iter.peek() {
+                            if *next_idx > page_idx + 1 { current_x += 3; } else { current_x += 1; }
+                        }
+                    }
+                }
+            }
+        } else if chunks.len() > 1 && mouse_event.row < chunks[1].bottom() {
             app.focus = Focus::Input;
-        } else if mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
+        } else if chunks.len() > 2 && mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
             if app.selected_table.is_some() {
                 app.focus = Focus::Table;
                 if let Some(table) = &app.selected_table {
+                    if chunks.len() <= 2 { return; }
+                    
                     let header_y = chunks[2].y + 3;
                     if mouse_event.row == header_y {
                         let start_x = chunks[2].x + 1;
@@ -270,6 +335,7 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                                 }
                                 app.selected_row = Some(0);
                                 app.scroll_y = 0;
+                                app.current_page = 0;
                                 break;
                             }
                             current_x += width + 3;
@@ -278,7 +344,8 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                         let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
                         if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
                             let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
-                            let row_index = app.scroll_y as usize + relative_y as usize;
+                            let start_idx = app.current_page * table_height;
+                            let row_index = start_idx + relative_y as usize;
                             let filtered = app.get_filtered_records(table);
                             if row_index < filtered.len() {
                                 let now = std::time::Instant::now();
@@ -319,7 +386,8 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                     let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
                     if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
                         let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
-                        let row_index = app.scroll_y as usize + relative_y as usize;
+                        let start_idx = app.current_page * table_height;
+                        let row_index = start_idx + relative_y as usize;
                         let filtered = app.get_filtered_records(table);
                         if row_index < filtered.len() {
                             let now = std::time::Instant::now();

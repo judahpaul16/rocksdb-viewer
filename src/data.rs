@@ -123,86 +123,35 @@ impl<T: DataLoader + Send + 'static + Clone> DataManager<T> {
         }
     }
 
-    pub fn refresh(&mut self) {
-        self.records = self.loader.load_records();
-        self.collect_headers();
-    }
 }
 
 #[derive(Clone)]
 pub struct PaginatedDataLoader {
     db_path: String,
-    page_size: usize,
-    current_page: usize,
     last_load_time: SystemTime,
-    record_counts: HashMap<String, usize>,
 }
 
 impl PaginatedDataLoader {
-    pub fn new(db_path: String, page_size: usize) -> Self {
-        let mut record_counts = HashMap::new();
-        let opts = Options::default();
-        if let Ok(db) = DB::open_for_read_only(&opts, &db_path, false) {
-            let iter = db.iterator(IteratorMode::Start);
-            for item in iter {
-                if let Ok((key_bytes, _)) = item {
-                    let key = String::from_utf8_lossy(&key_bytes).to_string();
-                    let record_type = key.split(':').next().unwrap_or("unknown").to_string();
-                    *record_counts.entry(record_type).or_insert(0) += 1;
-                }
-            }
-        }
-        
-        Self {
-            db_path,
-            page_size,
-            current_page: 0,
-            last_load_time: SystemTime::UNIX_EPOCH,
-            record_counts,
-        }
-    }
-
-    pub fn load_page(&mut self, record_type: &str) -> Vec<Record> {
-        let mut opts = Options::default();
-        opts.create_if_missing(false);
-        let mut records = Vec::new();
-        if let Ok(db) = DB::open_for_read_only(&opts, &self.db_path, false) {
-            let iter = db.iterator(IteratorMode::Start);
-            let start = self.current_page * self.page_size;
-            let end = start + self.page_size;
-            for (i, item) in iter.enumerate() {
-                if i < start { continue; }
-                if i >= end { break; }
-                let (key_bytes, value_bytes) = item.unwrap();
-                let key = String::from_utf8_lossy(&key_bytes).to_string();
-                let value = value_bytes.to_vec();
-                let record = deserialize_record(&key, &value);
-                if record.record_type == record_type {
-                    records.push(record);
-                }
-            }
-        }
-        records
-    }
-
-    pub fn next_page(&mut self) {
-        self.current_page += 1;
-    }
-
-    pub fn prev_page(&mut self) {
-        if self.current_page > 0 {
-            self.current_page -= 1;
-        }
+    pub fn new(db_path: String) -> Self {
+        Self { db_path, last_load_time: SystemTime::UNIX_EPOCH }
     }
 }
 
 impl DataLoader for PaginatedDataLoader {
     fn load_records(&self) -> HashMap<String, Vec<Record>> {
-        let mut records = HashMap::new();
-        for table_name in self.record_counts.keys() {
-            let mut this = self.clone();
-            let page_records = this.load_page(table_name);
-            records.insert(table_name.clone(), page_records);
+        let mut opts = Options::default();
+        opts.create_if_missing(false);
+        let mut records: HashMap<String, Vec<Record>> = HashMap::new();
+        if let Ok(db) = DB::open_for_read_only(&opts, &self.db_path, false) {
+            let iter = db.iterator(IteratorMode::Start);
+            for item in iter {
+                if let Ok((key_bytes, value_bytes)) = item {
+                    let key = String::from_utf8_lossy(&key_bytes).to_string();
+                    let value = value_bytes.to_vec();
+                    let record = deserialize_record(&key, &value);
+                    records.entry(record.record_type.clone()).or_insert_with(Vec::new).push(record);
+                }
+            }
         }
         records
     }

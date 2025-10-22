@@ -7,6 +7,7 @@ pub enum Focus {
     Input,
     TableSelect,
     Table,
+    Pages,
 }
 
 pub struct App {
@@ -22,12 +23,13 @@ pub struct App {
     pub table_select_index: usize,
     pub sort_column: Option<usize>,
     pub sort_ascending: bool,
+    pub current_page: usize,
+    pub page_focus: bool,
 }
 
 impl App {
     pub fn new(db_path: &str) -> Self {
-        let page_size = 100; // Default page size
-        let loader = PaginatedDataLoader::new(db_path.to_string(), page_size);
+    let loader = PaginatedDataLoader::new(db_path.to_string());
         let mut data_manager = DataManager::new(loader);
         data_manager.start_background_loading();
         if let Ok(initial_records) = data_manager.rx.recv() {
@@ -48,9 +50,28 @@ impl App {
             should_quit: false,
             sort_column: None,
             sort_ascending: true,
+            current_page: 0,
+            page_focus: false,
         }
     }
 
+    pub fn visible_page_indices(&self, total_pages: usize) -> Vec<usize> {
+        if total_pages == 0 { return vec![]; }
+        let last = total_pages.saturating_sub(1);
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(0);
+        set.insert(last);
+        let start = self.current_page.saturating_sub(3);
+        let end = (self.current_page + 3).min(last);
+        for i in start..=end { set.insert(i); }
+        if self.current_page < 5 {
+            for i in 0..=5.min(last) { set.insert(i); }
+        }
+        if last > 5 && self.current_page > last.saturating_sub(5) {
+            for i in last.saturating_sub(5)..=last { set.insert(i); }
+        }
+        set.into_iter().collect()
+    }
     pub fn calculate_column_widths(&self, record_type: &str, max_width: u16) -> Vec<u16> {
         let headers = match self.data_manager.get_headers().get(record_type) {
             Some(h) => h,
@@ -99,6 +120,16 @@ impl App {
         }
 
         widths
+    }
+
+    pub fn get_total_pages(&self, record_type: &str, height: u16) -> usize {
+        let records = self.get_filtered_records(record_type);
+        let records_per_page = height as usize;
+        if records.is_empty() {
+            1
+        } else {
+            (records.len() + records_per_page - 1) / records_per_page
+        }
     }
 
     pub fn get_filtered_records(&self, record_type: &str) -> Vec<Record> {

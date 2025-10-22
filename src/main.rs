@@ -59,7 +59,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
         let size = terminal.size()?;
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([ratatui::layout::Constraint::Length(1), ratatui::layout::Constraint::Length(3), ratatui::layout::Constraint::Min(1)].as_ref())
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(3),
+                ratatui::layout::Constraint::Min(1),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+            ].as_ref())
             .split(size);
 
         if crossterm::event::poll(Duration::from_millis(50))? {
@@ -68,7 +74,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, mut app: 
         }
         if app.should_quit {
             return Ok(app);
-        }        terminal.draw(|f| ui::ui(f, &mut app))?;
+    }        terminal.draw(|f| ui::ui(f, &mut app))?;
 
         if app.focus == Focus::Input {
             let cursor_x = chunks[1].x + 1 + app.input.len() as u16;
