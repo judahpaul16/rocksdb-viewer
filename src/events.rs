@@ -125,9 +125,18 @@ fn handle_pages_key(key: crossterm::event::KeyEvent, app: &mut App) {
         },
         KeyCode::Right => {
             if let Some(ref table) = app.selected_table {
-                let total_pages = app.get_total_pages(table, 20);
+                let height = app.rows_per_page.max(1) as u16;
+                let total_pages = app.get_total_pages(table, height);
                 if app.current_page + 1 < total_pages {
                     app.current_page += 1;
+                    // align scroll and selection to first row of the new page if needed
+                    let start_idx = app.current_page * app.rows_per_page.max(1);
+                    app.scroll_y = start_idx as u16;
+                    if let Some(sel) = app.selected_row {
+                        if sel < start_idx { app.selected_row = Some(start_idx); }
+                    } else {
+                        app.selected_row = Some(start_idx);
+                    }
                 }
             }
         },
@@ -172,12 +181,25 @@ fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
         }
         KeyCode::PageDown => {
             if let Some(table) = &app.selected_table {
-                let total_pages = app.get_total_pages(table, 20);
-                if app.current_page + 1 < total_pages { app.current_page += 1; }
+                let height = app.rows_per_page.max(1) as u16;
+                let total_pages = app.get_total_pages(table, height);
+                if app.current_page + 1 < total_pages {
+                    app.current_page += 1;
+                    let start_idx = app.current_page * app.rows_per_page.max(1);
+                    app.scroll_y = start_idx as u16;
+                    app.selected_row = Some(start_idx);
+                }
             }
         },
         KeyCode::PageUp => {
-            if app.current_page > 0 { app.current_page -= 1; }
+            if app.current_page > 0 {
+                app.current_page -= 1;
+                let start_idx = app.current_page * app.rows_per_page.max(1);
+                app.scroll_y = start_idx as u16;
+                // move selection to first row of page if it was beyond
+                let sel = app.selected_row.unwrap_or(start_idx);
+                app.selected_row = Some(sel.max(start_idx));
+            }
         },
         KeyCode::Char('d') => {
             if let (Some(table), Some(row)) = (app.selected_table.as_ref(), app.selected_row) {
@@ -230,9 +252,12 @@ fn handle_navigation_up(app: &mut App) {
                 if row > 0 {
                     let new_row = row - 1;
                     app.selected_row = Some(new_row);
-
-                    if new_row < app.scroll_y as usize {
-                        app.scroll_y = new_row as u16;
+                    let rpp = app.rows_per_page.max(1);
+                    let start_idx = app.current_page * rpp;
+                    if new_row < start_idx {
+                        app.current_page = app.current_page.saturating_sub(1);
+                        let new_start = app.current_page * rpp;
+                        app.scroll_y = new_start as u16;
                     }
                 }
             } else {
@@ -258,9 +283,12 @@ fn handle_navigation_down(app: &mut App) {
                 if row < max_row {
                     let new_row = row + 1;
                     app.selected_row = Some(new_row);
-
-                    if new_row >= app.scroll_y as usize + 9 {
-                        app.scroll_y = new_row as u16 - 8;
+                    let rpp = app.rows_per_page.max(1);
+                    let start_idx = app.current_page * rpp;
+                    if new_row >= start_idx + rpp {
+                        app.current_page += 1;
+                        let new_start = app.current_page * rpp;
+                        app.scroll_y = new_start as u16;
                     }
                 }
             } else {
@@ -282,8 +310,7 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
         if chunks.len() > 3 && mouse_event.row >= chunks[3].top() && mouse_event.row < chunks[3].bottom() {
             if let Some(table) = &app.selected_table {
                 if let Some(records) = app.data_manager.get_records().get(table) {
-                    let table_height = if chunks.len() > 2 { (chunks[2].height.saturating_sub(4)) as usize } else { 20 };
-                    let records_per_page = table_height;
+                    let records_per_page = app.rows_per_page.max(1);
                     let total_pages = (records.len() + records_per_page - 1) / records_per_page;
                     let prefix = " Pages: ";
                     let mut current_x = chunks[3].x + prefix.chars().count() as u16;
@@ -313,13 +340,13 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
             }
         } else if chunks.len() > 1 && mouse_event.row < chunks[1].bottom() {
             app.focus = Focus::Input;
-        } else if chunks.len() > 2 && mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
+    } else if chunks.len() > 2 && mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
             if app.selected_table.is_some() {
                 app.focus = Focus::Table;
                 if let Some(table) = &app.selected_table {
                     if chunks.len() <= 2 { return; }
                     
-                    let header_y = chunks[2].y + 3;
+                    let header_y = chunks[2].y + 1;
                     if mouse_event.row == header_y {
                         let start_x = chunks[2].x + 1;
                         let max_width = chunks[2].width.saturating_sub(2);
@@ -341,10 +368,11 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                             current_x += width + 3;
                         }
                     } else {
-                        let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
-                        if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
-                            let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
-                            let start_idx = app.current_page * table_height;
+                        let rows_per_page = app.rows_per_page.max(1);
+                        let inner_top = chunks[2].top() + 1; // inside outer block border
+                        if mouse_event.row >= inner_top + 1 && mouse_event.row < inner_top + 1 + rows_per_page as u16 {
+                            let relative_y = mouse_event.row.saturating_sub(inner_top + 1);
+                            let start_idx = app.current_page * rows_per_page;
                             let row_index = start_idx + relative_y as usize;
                             let filtered = app.get_filtered_records(table);
                             if row_index < filtered.len() {
@@ -380,13 +408,14 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                     app.sort_ascending = true;
                 }
             }
-        } else if app.focus == Focus::Table {
+    } else if app.focus == Focus::Table {
             if let Some(table) = &app.selected_table {
                 if mouse_event.row >= chunks[2].top() && mouse_event.row < chunks[2].bottom() {
-                    let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
-                    if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
-                        let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
-                        let start_idx = app.current_page * table_height;
+                    let rows_per_page = app.rows_per_page.max(1);
+                    let inner_top = chunks[2].top() + 1;
+                    if mouse_event.row >= inner_top + 1 && mouse_event.row < inner_top + 1 + rows_per_page as u16 {
+                        let relative_y = mouse_event.row.saturating_sub(inner_top + 1);
+                        let start_idx = app.current_page * rows_per_page;
                         let row_index = start_idx + relative_y as usize;
                         let filtered = app.get_filtered_records(table);
                         if row_index < filtered.len() {

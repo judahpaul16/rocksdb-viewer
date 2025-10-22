@@ -73,10 +73,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title(Line::from(vec![Span::styled("available record types:", Style::default().fg(records_color))])));
         f.render_widget(list, chunks[2]);
     } else {
-        let title = Line::from(vec![Span::styled("records:", Style::default().fg(records_color))]);
-        let block = Block::default().borders(Borders::ALL).title(title);
-        let inner_area = block.inner(chunks[2]);
-        f.render_widget(block, chunks[2]);
+    let title = Line::from(vec![Span::styled("records:", Style::default().fg(records_color))]);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner_area = block.inner(chunks[2]);
+    // Draw a single outer block; the inner area will host the Table without its own block
+    f.render_widget(block, chunks[2]);
 
         if let Some(ref record_type) = app.selected_table {
             let records = app.get_filtered_records(record_type);
@@ -95,20 +96,22 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     ratatui::widgets::Row::new(cells).style(style)
                 }).collect();
 
-                let table_height = chunks[2].height.saturating_sub(4);
+                // rows_per_page equals the inner area height minus 1 header row
+                let rows_per_page = inner_area.height.saturating_sub(1) as usize;
+                app.rows_per_page = rows_per_page.max(1);
 
-                let total_pages = app.get_total_pages(record_type, table_height);
+                let total_pages = app.get_total_pages(record_type, app.rows_per_page as u16);
                 if total_pages > 0 && app.current_page >= total_pages {
                     app.current_page = total_pages.saturating_sub(1);
                 }
 
-                let records_per_page = table_height as usize;
-                let start_idx = app.current_page * records_per_page;
+                let start_idx = app.current_page * app.rows_per_page;
                 let visible_rows: Vec<ratatui::widgets::Row> = rows.into_iter()
                     .skip(start_idx)
-                    .take(records_per_page)
+                    .take(app.rows_per_page)
                     .collect();
-                let table_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, table_height);
+                // Render the table directly into the inner area; header occupies the first line
+                let table_area = inner_area;
                 let header_cells = headers.iter().enumerate().map(|(i, h)| {
                     let mut style = Style::default().fg(Color::Yellow);
                     let mut header_text = format!(" {}", h);
@@ -125,13 +128,10 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 let table = Table::new(visible_rows)
                     .header(header_row)
                     .widths(&constraints)
-                    .block(Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!("{} records", record_type)))
                     .column_spacing(3);
                 f.render_widget(table, table_area);
 
-                let total_pages = app.get_total_pages(record_type, table_height);
+                let total_pages = app.get_total_pages(record_type, app.rows_per_page as u16);
                 if total_pages > 1 {
                     let mut page_spans = Vec::new();
                     page_spans.push(Span::styled(" Pages: ", Style::default().fg(Color::White)));

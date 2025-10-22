@@ -25,6 +25,7 @@ pub struct App {
     pub sort_ascending: bool,
     pub current_page: usize,
     pub page_focus: bool,
+    pub rows_per_page: usize,
 }
 
 impl App {
@@ -52,6 +53,7 @@ impl App {
             sort_ascending: true,
             current_page: 0,
             page_focus: false,
+            rows_per_page: 20,
         }
     }
 
