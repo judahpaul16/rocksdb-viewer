@@ -86,6 +86,8 @@ fn handle_table_select_key(key: crossterm::event::KeyEvent, app: &mut App) {
                 app.selected_table = Some(types[app.table_select_index].clone());
                 app.selected_row = Some(0);
                 app.focus = Focus::Table;
+                app.sort_column = None;
+                app.sort_ascending = true;
             }
         }
         KeyCode::Up => {
@@ -118,6 +120,8 @@ fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
                         let prev_index = current_index - 1;
                         app.selected_table = Some(types[prev_index].clone());
                         app.selected_row = Some(0);
+                        app.sort_column = None;
+                        app.sort_ascending = true;
                     } else {
                         app.focus = Focus::Input;
                     }
@@ -136,6 +140,14 @@ fn handle_table_key(key: crossterm::event::KeyEvent, app: &mut App, db_path: &st
                 }
             }
         }
+        KeyCode::PageDown => {
+            app.data_manager.loader.next_page();
+            app.data_manager.refresh();
+        },
+        KeyCode::PageUp => {
+            app.data_manager.loader.prev_page();
+            app.data_manager.refresh();
+        },
         KeyCode::Char('d') => {
             if let (Some(table), Some(row)) = (app.selected_table.as_ref(), app.selected_row) {
                 let filtered = app.get_filtered_records(table);
@@ -242,26 +254,48 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
             if app.selected_table.is_some() {
                 app.focus = Focus::Table;
                 if let Some(table) = &app.selected_table {
-                    let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
-                    if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
-                        let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
-                        let row_index = app.scroll_y as usize + relative_y as usize;
-                        let filtered = app.get_filtered_records(table);
-                        if row_index < filtered.len() {
-                            let now = std::time::Instant::now();
-                            if let Some((last_time, last_table, last_row)) = &app.last_click {
-                                if now.duration_since(*last_time).as_millis() < 500 && *last_table == *table && *last_row == row_index {
-                                    let record = &filtered[row_index];
-                                    let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
-                                    app.show_raw_data = Some(format!("{}:\n{}", record.key, pretty_hex));
-                                    app.last_click = None;
+                    let header_y = chunks[2].y + 3;
+                    if mouse_event.row == header_y {
+                        let start_x = chunks[2].x + 1;
+                        let max_width = chunks[2].width.saturating_sub(2);
+                        let widths = app.calculate_column_widths(table, max_width);
+                        let mut current_x = start_x;
+                        for (i, &width) in widths.iter().enumerate() {
+                            if mouse_event.column >= current_x && mouse_event.column < current_x + width + 3 {
+                                if app.sort_column == Some(i) {
+                                    app.sort_ascending = !app.sort_ascending;
+                                } else {
+                                    app.sort_column = Some(i);
+                                    app.sort_ascending = true;
+                                }
+                                app.selected_row = Some(0);
+                                app.scroll_y = 0;
+                                break;
+                            }
+                            current_x += width + 3;
+                        }
+                    } else {
+                        let table_height = (chunks[2].height as usize).saturating_sub(4).min(20);
+                        if mouse_event.row >= chunks[2].top() + 3 && mouse_event.row < chunks[2].top() + 3 + table_height as u16 {
+                            let relative_y = mouse_event.row.saturating_sub(1).saturating_sub(chunks[2].top() + 3);
+                            let row_index = app.scroll_y as usize + relative_y as usize;
+                            let filtered = app.get_filtered_records(table);
+                            if row_index < filtered.len() {
+                                let now = std::time::Instant::now();
+                                if let Some((last_time, last_table, last_row)) = &app.last_click {
+                                    if now.duration_since(*last_time).as_millis() < 500 && *last_table == *table && *last_row == row_index {
+                                        let record = &filtered[row_index];
+                                        let pretty_hex = record.raw_data.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ");
+                                        app.show_raw_data = Some(format!("{}:\n{}", record.key, pretty_hex));
+                                        app.last_click = None;
+                                    } else {
+                                        app.last_click = Some((now, table.clone(), row_index));
+                                        app.selected_row = Some(row_index);
+                                    }
                                 } else {
                                     app.last_click = Some((now, table.clone(), row_index));
                                     app.selected_row = Some(row_index);
                                 }
-                            } else {
-                                app.last_click = Some((now, table.clone(), row_index));
-                                app.selected_row = Some(row_index);
                             }
                         }
                     }
@@ -275,6 +309,8 @@ fn handle_mouse_event(mouse_event: crossterm::event::MouseEvent, app: &mut App, 
                     app.selected_table = Some(types[app.table_select_index].clone());
                     app.selected_row = Some(0);
                     app.focus = Focus::Table;
+                    app.sort_column = None;
+                    app.sort_ascending = true;
                 }
             }
         } else if app.focus == Focus::Table {

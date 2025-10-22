@@ -1,6 +1,5 @@
-use crate::data::{DataManager, FullDataLoader};
+use crate::data::{DataManager, PaginatedDataLoader};
 use crate::models::Record;
-use ratatui::layout::Constraint;
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,7 +10,7 @@ pub enum Focus {
 }
 
 pub struct App {
-    pub data_manager: DataManager<FullDataLoader>,
+    pub data_manager: DataManager<PaginatedDataLoader>,
     pub input: String,
     pub scroll_y: u16,
     pub focus: Focus,
@@ -21,11 +20,14 @@ pub struct App {
     pub should_quit: bool,
     pub last_click: Option<(Instant, String, usize)>,
     pub table_select_index: usize,
+    pub sort_column: Option<usize>,
+    pub sort_ascending: bool,
 }
 
 impl App {
     pub fn new(db_path: &str) -> Self {
-        let loader = FullDataLoader::new(db_path.to_string());
+        let page_size = 100; // Default page size
+        let loader = PaginatedDataLoader::new(db_path.to_string(), page_size);
         let mut data_manager = DataManager::new(loader);
         data_manager.start_background_loading();
         if let Ok(initial_records) = data_manager.rx.recv() {
@@ -44,27 +46,37 @@ impl App {
             last_click: None,
             table_select_index: 0,
             should_quit: false,
+            sort_column: None,
+            sort_ascending: true,
         }
     }
 
-    pub fn calculate_column_widths(&self, record_type: &str, max_width: u16) -> Vec<Constraint> {
+    pub fn calculate_column_widths(&self, record_type: &str, max_width: u16) -> Vec<u16> {
         let headers = match self.data_manager.get_headers().get(record_type) {
             Some(h) => h,
-            None => return vec![Constraint::Percentage(100)],
+            None => return vec![max_width],
         };
 
         let records = match self.data_manager.get_records().get(record_type) {
             Some(r) => r,
-            None => return vec![Constraint::Percentage(100)],
+            None => return vec![max_width],
         };
 
-        let mut column_widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+        let mut column_widths: Vec<usize> = headers.iter().enumerate().map(|(i, h)| {
+            let base_len = h.len() + 1;
+            if self.sort_column == Some(i) { base_len + 3 } else { base_len }
+        }).collect();
 
         for record in records {
             let row_data = record.to_table_row(headers);
             for (i, cell) in row_data.iter().enumerate() {
                 if i < column_widths.len() {
-                    column_widths[i] = column_widths[i].max(cell.len().min(50));
+                    let cell_width = if self.sort_column == Some(i) {
+                        cell.len() + 2
+                    } else {
+                        cell.len()
+                    };
+                    column_widths[i] = column_widths[i].max(cell_width.min(50));
                 }
             }
         }
@@ -74,25 +86,47 @@ impl App {
 
         if total_width < available_width {
             return column_widths.iter()
-                .map(|&width| Constraint::Min(width as u16))
+                .map(|&width| width as u16)
                 .collect();
         }
 
-        let mut constraints = Vec::new();
+        let mut widths = Vec::new();
         for (i, &width) in column_widths.iter().enumerate() {
             let ratio = width as f32 / total_width as f32;
-            let min_width = if i == 0 { 20 } else { 10 };
+            let min_width = if i == 0 { 24 } else { 14 };
             let allocated = ((available_width as f32 * ratio) as u16).max(min_width);
-            constraints.push(Constraint::Min(allocated));
+            widths.push(allocated);
         }
 
-        constraints
+        widths
     }
 
     pub fn get_filtered_records(&self, record_type: &str) -> Vec<Record> {
         let mut records = self.data_manager.get_records().get(record_type).unwrap().clone();
         if !self.input.is_empty() {
             records.retain(|r| r.key.contains(&self.input));
+        }
+        if let Some(sort_col) = self.sort_column {
+            records.sort_by(|a, b| {
+                let headers = self.data_manager.get_headers().get(record_type).unwrap();
+                let a_row = a.to_table_row(headers);
+                let b_row = b.to_table_row(headers);
+                let a_val = a_row.get(sort_col).map(|s| s.as_str()).unwrap_or("");
+                let b_val = b_row.get(sort_col).map(|s| s.as_str()).unwrap_or("");
+                
+                match (a_val.parse::<f64>(), b_val.parse::<f64>()) {
+                    (Ok(a_num), Ok(b_num)) => if self.sort_ascending {
+                        a_num.partial_cmp(&b_num).unwrap_or(std::cmp::Ordering::Equal)
+                    } else {
+                        b_num.partial_cmp(&a_num).unwrap_or(std::cmp::Ordering::Equal)
+                    },
+                    _ => if self.sort_ascending {
+                        a_val.cmp(b_val)
+                    } else {
+                        b_val.cmp(a_val)
+                    }
+                }
+            });
         }
         records
     }

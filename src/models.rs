@@ -4,7 +4,6 @@ use serde_json::Value;
 pub struct Record {
     pub record_type: String,
     pub key: String,
-    pub timestamp: i64,
     pub data: Value,
     pub raw_data: Vec<u8>,
 }
@@ -44,19 +43,11 @@ pub fn deserialize_record(key: &str, value: &[u8]) -> Record {
     let parts: Vec<&str> = key.split(':').collect();
     let record_type = parts.first().unwrap_or(&"unknown").to_string();
 
-    let timestamp = if parts.len() >= 3 {
-        parts[parts.len() - 1].parse::<i64>().unwrap_or(0)
-    } else if parts.len() == 2 && record_type == "summary" {
-        parts[1].parse::<i64>().unwrap_or(0)
-    } else {
-        0
-    };
-
     let data = if let Ok(v) = serde_json::from_slice::<Value>(value) {
         v
     } else {
         Value::Object(serde_json::Map::from_iter(vec![("value".to_string(), Value::String(String::from_utf8_lossy(value).to_string()))]))
     };
 
-    Record { record_type, key: key.to_string(), timestamp, data, raw_data: value.to_vec() }
+    Record { record_type, key: key.to_string(), data, raw_data: value.to_vec() }
 }

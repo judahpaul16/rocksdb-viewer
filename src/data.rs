@@ -16,15 +16,6 @@ pub struct FullDataLoader {
     last_load_time: SystemTime,
 }
 
-impl FullDataLoader {
-    pub fn new(db_path: String) -> Self {
-        Self {
-            db_path,
-            last_load_time: SystemTime::UNIX_EPOCH,
-        }
-    }
-}
-
 impl DataLoader for FullDataLoader {
     fn load_records(&self) -> HashMap<String, Vec<Record>> {
         let mut opts = Options::default();
@@ -38,9 +29,6 @@ impl DataLoader for FullDataLoader {
                 let value = value_bytes.to_vec();
                 let record = deserialize_record(&key, &value);
                 records.entry(record.record_type.clone()).or_insert_with(Vec::new).push(record);
-            }
-            for recs in records.values_mut() {
-                recs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
             }
         }
         records
@@ -57,7 +45,7 @@ impl DataLoader for FullDataLoader {
 }
 
 pub struct DataManager<T: DataLoader> {
-    loader: T,
+    pub loader: T,
     pub records: HashMap<String, Vec<Record>>,
     pub headers: HashMap<String, Vec<String>>,
     tx: mpsc::Sender<HashMap<String, Vec<Record>>>,
@@ -134,29 +122,43 @@ impl<T: DataLoader + Send + 'static + Clone> DataManager<T> {
             self.headers.insert(record_type.clone(), headers);
         }
     }
+
+    pub fn refresh(&mut self) {
+        self.records = self.loader.load_records();
+        self.collect_headers();
+    }
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct PaginatedDataLoader {
     db_path: String,
     page_size: usize,
     current_page: usize,
-    total_records: usize,
-    records: Vec<Record>,
     last_load_time: SystemTime,
+    record_counts: HashMap<String, usize>,
 }
 
-#[allow(dead_code)]
 impl PaginatedDataLoader {
     pub fn new(db_path: String, page_size: usize) -> Self {
+        let mut record_counts = HashMap::new();
+        let opts = Options::default();
+        if let Ok(db) = DB::open_for_read_only(&opts, &db_path, false) {
+            let iter = db.iterator(IteratorMode::Start);
+            for item in iter {
+                if let Ok((key_bytes, _)) = item {
+                    let key = String::from_utf8_lossy(&key_bytes).to_string();
+                    let record_type = key.split(':').next().unwrap_or("unknown").to_string();
+                    *record_counts.entry(record_type).or_insert(0) += 1;
+                }
+            }
+        }
+        
         Self {
             db_path,
             page_size,
             current_page: 0,
-            total_records: 0,
-            records: vec![],
             last_load_time: SystemTime::UNIX_EPOCH,
+            record_counts,
         }
     }
 
@@ -179,7 +181,6 @@ impl PaginatedDataLoader {
                     records.push(record);
                 }
             }
-            records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         }
         records
     }
@@ -197,21 +198,11 @@ impl PaginatedDataLoader {
 
 impl DataLoader for PaginatedDataLoader {
     fn load_records(&self) -> HashMap<String, Vec<Record>> {
-        let mut opts = Options::default();
-        opts.create_if_missing(false);
         let mut records = HashMap::new();
-        if let Ok(db) = DB::open_for_read_only(&opts, &self.db_path, false) {
-            let iter = db.iterator(IteratorMode::Start);
-            for item in iter {
-                let (key_bytes, value_bytes) = item.unwrap();
-                let key = String::from_utf8_lossy(&key_bytes).to_string();
-                let value = value_bytes.to_vec();
-                let record = deserialize_record(&key, &value);
-                records.entry(record.record_type.clone()).or_insert_with(Vec::new).push(record);
-            }
-            for recs in records.values_mut() {
-                recs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-            }
+        for table_name in self.record_counts.keys() {
+            let mut this = self.clone();
+            let page_records = this.load_page(table_name);
+            records.insert(table_name.clone(), page_records);
         }
         records
     }

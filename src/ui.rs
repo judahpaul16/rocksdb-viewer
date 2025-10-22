@@ -8,6 +8,11 @@ use ratatui::{
 };
 
 pub fn ui(f: &mut Frame, app: &mut App) {
+    let footer_bg_color = Color::Blue;
+    let footer_fg_color = Color::Green;
+    let search_color = Color::Magenta;
+    let records_color = Color::Blue;
+
     let size = f.size();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -19,7 +24,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         ].as_ref())
         .split(size);
 
-    let title_line = Line::from(vec![Span::styled("search:", Style::default().fg(Color::Blue))]);
+    let title_line = Line::from(vec![Span::styled("search:", Style::default().fg(search_color))]);
 
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default()
@@ -36,13 +41,13 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(paragraph, area);
 
         let status_spans = vec![
-            Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::styled(" Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
             Span::raw(": quit  "),
-            Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::styled("Esc", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
             Span::raw(": go back")
         ];
         let status_line = Paragraph::new(Line::from(status_spans));
-        let status_block = Block::default().style(Style::default().bg(Color::Green));
+        let status_block = Block::default().style(Style::default().bg(footer_bg_color));
         f.render_widget(status_line.block(status_block), chunks[3]);
         return;
     }
@@ -64,19 +69,16 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             ListItem::new(t.as_str()).style(style)
         }).collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(Line::from(vec![Span::styled("available record types:", Style::default().fg(Color::Magenta))])));
+            .block(Block::default().borders(Borders::ALL).title(Line::from(vec![Span::styled("available record types:", Style::default().fg(records_color))])));
         f.render_widget(list, chunks[2]);
     } else {
-        let title = Line::from(vec![Span::styled("records:", Style::default().fg(Color::Magenta))]);
+        let title = Line::from(vec![Span::styled("records:", Style::default().fg(records_color))]);
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner_area = block.inner(chunks[2]);
         f.render_widget(block, chunks[2]);
 
         if let Some(ref record_type) = app.selected_table {
-            let mut records = app.data_manager.get_records().get(record_type).unwrap().clone();
-            if !app.input.is_empty() {
-                records.retain(|r| r.key.contains(&app.input));
-            }
+            let records = app.get_filtered_records(record_type);
             if !records.is_empty() {
                 let headers = app.data_manager.get_headers().get(record_type).unwrap();
 
@@ -99,12 +101,22 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     .take(table_height as usize)
                     .collect();
                 let table_area = Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, table_height);
-                let header_cells = headers.iter().cloned().map(ratatui::widgets::Cell::from);
-                let header_row = ratatui::widgets::Row::new(header_cells).style(Style::default().fg(Color::Yellow));
+                let header_cells = headers.iter().enumerate().map(|(i, h)| {
+                    let mut style = Style::default().fg(Color::Yellow);
+                    let mut header_text = format!(" {}", h);
+                    if app.sort_column == Some(i) {
+                        style = style.bg(Color::DarkGray).add_modifier(ratatui::style::Modifier::BOLD);
+                        let arrow = if app.sort_ascending { " ▲ " } else { " ▼ " };
+                        header_text.push_str(arrow);
+                    }
+                    ratatui::widgets::Cell::from(header_text).style(style)
+                });
+                let header_row = ratatui::widgets::Row::new(header_cells);
 
+                let constraints: Vec<Constraint> = widths.iter().map(|&w| Constraint::Length(w)).collect();
                 let table = Table::new(visible_rows)
                     .header(header_row)
-                    .widths(&widths)
+                    .widths(&constraints)
                     .block(Block::default()
                         .borders(Borders::ALL)
                         .title(format!("{} records", record_type)))
@@ -115,26 +127,26 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
 
     let mut spans = vec![
-        Span::styled("Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::styled(" Ctrl+C", Style::default().fg(Color::Red).add_modifier(ratatui::style::Modifier::BOLD)),
         Span::raw(": quit  ")
     ];
 
     match app.focus {
         crate::app::Focus::TableSelect => {
             spans.extend(vec![
-                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Tab", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": focus search  "),
-                Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Enter", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": select  "),
-                Span::styled("Up/Down", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Up/Down", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": navigate")
             ]);
         },
         crate::app::Focus::Table => {
             spans.extend(vec![
-                Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Esc", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": go back  "),
-                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Tab", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": focus search  "),
                 Span::styled("r", Style::default().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(": view raw record value  "),
@@ -145,12 +157,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         crate::app::Focus::Input => {
             if app.selected_table.is_some() {
                 spans.extend(vec![
-                    Span::styled("Esc", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                    Span::styled("Esc", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                     Span::raw(": go back  ")
                 ]);
             }
             spans.extend(vec![
-                Span::styled("Tab", Style::default().fg(Color::Green).add_modifier(ratatui::style::Modifier::BOLD)),
+                Span::styled("Tab", Style::default().fg(footer_fg_color).add_modifier(ratatui::style::Modifier::BOLD)),
                 Span::raw(if app.selected_table.is_none() {
                     ": focus table selection"
                 } else {
@@ -161,7 +173,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     }
     let status_line = Paragraph::new(Line::from(spans));
     let status_block = Block::default()
-        .style(Style::default().bg(Color::Green));
+        .style(Style::default().bg(footer_bg_color));
     f.render_widget(status_line.block(status_block), chunks[3]);
 }
 
